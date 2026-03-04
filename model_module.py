@@ -6,6 +6,78 @@ from torchmetrics import CohenKappa, F1Score
 from torchmetrics.classification import BinaryAccuracy
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
+import torch.nn.functional as F
+import numpy as np
+from sklearn.metrics import cohen_kappa_score
+
+class DRRegressor(pl.LightningModule):
+    def __init__(self, model_name='efficientnet_b3', lr=1e-4):
+        super().__init__()
+        self.save_hyperparameters()
+        
+        # 1. Load backbone without the classification head
+        self.backbone = timm.create_model(model_name, pretrained=True, num_classes=0)
+        n_features = self.backbone.num_features
+        
+        # 2. Build the continuous regression head
+        self.regression_head = nn.Sequential(
+            nn.Dropout(0.4),
+            nn.Linear(n_features, 256),
+            nn.SiLU(),
+            nn.Dropout(0.2),
+            nn.Linear(256, 1)  # Outputs a single float!
+        )
+        
+        self.validation_step_preds = []
+        self.validation_step_targets = []
+
+    def forward(self, x):
+        features = self.backbone(x)
+        return self.regression_head(features).squeeze(-1)
+
+    def smoothed_mse_loss(self, preds, targets, noise_std=0.1):
+        """Adds slight Gaussian noise to labels to teach the continuous spectrum"""
+        targets = targets.float()
+        if self.training and torch.rand(1).item() > 0.5:
+            noise = torch.randn_like(targets) * noise_std
+            targets = torch.clamp(targets + noise, min=0.0, max=4.0)
+        return F.mse_loss(preds, targets)
+
+    def training_step(self, batch, batch_idx):
+        x, y = batch
+        preds = self(x)
+        loss = self.smoothed_mse_loss(preds, y)
+        self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        x, y = batch
+        preds = self(x)
+        # Standard MSE for validation
+        loss = F.mse_loss(preds, y.float())
+        self.log('val_loss', loss, prog_bar=True)
+        
+        # Store for epoch-end Kappa calculation
+        self.validation_step_preds.append(preds.detach().cpu())
+        self.validation_step_targets.append(y.detach().cpu())
+        return loss
+
+    def on_validation_epoch_end(self):
+        preds = torch.cat(self.validation_step_preds).numpy()
+        targets = torch.cat(self.validation_step_targets).numpy()
+        
+        # For monitoring during training, we use standard rounding [0.5, 1.5, 2.5, 3.5]
+        # We will dynamically optimize these thresholds AFTER training!
+        discrete_preds = np.clip(np.round(preds), 0, 4).astype(int)
+        
+        val_kappa = cohen_kappa_score(targets, discrete_preds, weights='quadratic')
+        self.log('val_kappa', val_kappa, prog_bar=True)
+        
+        self.validation_step_preds.clear()
+        self.validation_step_targets.clear()
+
+    def configure_optimizers(self):
+        return torch.optim.AdamW(self.parameters(), lr=self.hparams.lr, weight_decay=1e-4)
 
 class DRClassifier(pl.LightningModule):
     def __init__(self, model_name='efficientnet_b3', num_classes=5, lr=1e-4):

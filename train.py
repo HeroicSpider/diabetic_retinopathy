@@ -8,6 +8,7 @@ from pytorch_lightning.loggers import MLFlowLogger
 
 from data_module import DRDataModule
 from model_module import DRClassifier
+from model_module import DRRegressor
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -49,9 +50,8 @@ def main():
     )
     
     # 2. Init Model
-    model = DRClassifier(
+    model = DRRegressor(               # <--- CHANGED FROM DRClassifier
         model_name=args.model_name,
-        num_classes=5,
         lr=args.lr
     )
     
@@ -89,7 +89,7 @@ def main():
     
     # 5. Train
     trainer.fit(model, datamodule=dm)
-    
+'''    
     # 6. Calibrate & Persist
     best_path = checkpoint_callback.best_model_path
     if best_path:
@@ -113,5 +113,6 @@ def main():
         print(f"Calibrated bundle saved to: {calibrated_path}")
         mlf_logger.experiment.log_artifact(run_id, calibrated_path, artifact_path="models")
 
+        '''
 if __name__ == '__main__':
     main()
